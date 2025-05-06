@@ -17,3 +17,6 @@
 2. oled显示屏会实时显示当前状态
 3. 发送语音输入到后台[asr-llm-tts](https://github.com/esp32-qwen-ai/asr-llm-tts)中枢处理
 4. 接收处理后的音频通过扬声器播放结果
+
+# 4. 适配
+修改`main.py`里的`Connection.HOST`和`Connection.PORT`为`asr-llm-tts`监听地址
