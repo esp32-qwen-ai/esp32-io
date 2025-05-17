@@ -12,7 +12,7 @@ BITS = 16
 RECORD_TIME_IN_SECONDS = 5
 RECORD_BUF_SIZE = RECORD_TIME_IN_SECONDS * MIC_SAMPLE_RATE * BITS // 8
 
-SOCKET_BUF_SIZE = 1024
+SOCKET_BUF_SIZE = 4096
 
 class AudioPlayer:
     def __init__(self, sck_pin, ws_pin, sd_pin):
@@ -81,6 +81,9 @@ class Request:
 class Response:
     HEADER_SIZE = 8
     MAGIC = b'bee'  # 3字节魔数
+    ASR_BIT = 0x2
+    LLM_BIT = 0x1
+    TTS_BIT = 0
 
     PCM_DATA = 1
     EXIT_CHAT = 2
@@ -90,7 +93,7 @@ class Response:
         self.magic = Request.MAGIC  # 3字节魔数
         self.type = 0               # 1字节类型
         self.eof = 0                # 1字节标识结束
-        self.dummy1 = 0             # 1字节保留字段
+        self.is_local = 0           # 1字节标识用的本地还是远端大模型：asr | llm | tts
         self.length = 0             # 2字节长度
 
         self.data = b''
@@ -105,7 +108,7 @@ class Response:
         resp.magic = unpacked[0]
         resp.type = unpacked[1]
         resp.eof = unpacked[2]
-        resp.dummy1 = unpacked[3]
+        resp.is_local = unpacked[3]
         resp.length = unpacked[4]
 
         return resp
@@ -113,7 +116,7 @@ class Response:
     def to_bytes(self):
         # 使用 struct.pack 打包数据
         # 格式字符串：3s B B B H -> 3字节字符串、1字节无符号char、1字节、1字节、2字节短整型
-        packed = struct.pack('<3sBBBH', self.magic, self.type, self.eof, self.dummy1, self.length)
+        packed = struct.pack('<3sBBBH', self.magic, self.type, self.eof, self.is_local, self.length)
         return packed + self.data
 
 class ExitChatException(Exception):
@@ -125,8 +128,9 @@ class Connection:
     HOST = 'dev.lan'
     PORT = 3000
 
-    def __init__(self):
+    def __init__(self, oled):
         self.socket = None
+        self.oled = oled
 
     def __del__(self):
         self.disconnect()
@@ -134,6 +138,10 @@ class Connection:
     def wait_ready(self):
         if self.socket:
             return
+        self.oled.oled.Clear()
+        self.oled.oled.Text("CONNECTING...", 0, 0)
+        self.oled.oled.Text(f"{Connection.HOST}:{Connection.PORT}", 0, 16)
+        self.oled.oled.Show()
         self.connect()
 
     def connect(self):
@@ -173,16 +181,30 @@ class Connection:
         self.socket.sendall(req.to_bytes())
 
     def receive_stream(self):
+        show_meta = True
         while True:
             resp_header = self.socket.recv(Response.HEADER_SIZE)
             assert len(resp_header) == Response.HEADER_SIZE
             resp = Response.from_bytes(resp_header)
-            # print(f"resp: {resp.magic}, eof: {resp.eof}, length: {resp.length}")
+            # print(f"resp: {resp.magic}, type: {resp.type}, eof: {resp.eof}, length: {resp.length}")
 
             if resp.magic != Response.MAGIC:
                 raise ValueError(f"Invalid magic: {resp.magic}")
 
+            if show_meta and resp.length > 0:
+                show_meta = False
+                asr = "offline" if resp.is_local & (1 << Response.ASR_BIT) else "online"
+                llm = "offline" if resp.is_local & (1 << Response.LLM_BIT) else "online"
+                tts = "offline" if resp.is_local & (1 << Response.TTS_BIT) else "online"
+                self.oled.oled.Clear()
+                self.oled.oled.Text("RESPONDING...", 0, 0)
+                self.oled.oled.Text(f"ASR {asr}", 0, 16)
+                self.oled.oled.Text(f"LLM {llm}", 0, 32)
+                self.oled.oled.Text(f"TTS {tts}", 0, 48)
+                self.oled.oled.Show()
+
             if resp.type == Response.EXIT_CHAT:
+                self.oled.show("EXIT_CHAT")
                 raise ExitChatException("Received EXIT_CHAT")
 
             if resp.type != Response.PCM_DATA:
@@ -201,30 +223,13 @@ class Connection:
             if resp.eof == 1:
                 break
 
-def create_wav_header(sampleRate, bitsPerSample, num_channels, num_samples):
-    datasize = int(num_samples * num_channels * bitsPerSample // 8)
-    o = bytes("RIFF",'ascii')                                                   # (4byte) Marks file as RIFF
-    o += (datasize + 36).to_bytes(4,'little')                                   # (4byte) File size in bytes excluding this and RIFF marker
-    o += bytes("WAVE",'ascii')                                                  # (4byte) File type
-    o += bytes("fmt ",'ascii')                                                  # (4byte) Format Chunk Marker
-    o += (16).to_bytes(4,'little')                                              # (4byte) Length of above format data
-    o += (1).to_bytes(2,'little')                                               # (2byte) Format type (1 - PCM)
-    o += (num_channels).to_bytes(2,'little')                                    # (2byte)
-    o += (sampleRate).to_bytes(4,'little')                                      # (4byte)
-    o += (sampleRate * num_channels * bitsPerSample // 8).to_bytes(4,'little')  # (4byte)
-    o += (num_channels * bitsPerSample // 8).to_bytes(2,'little')               # (2byte)
-    o += (bitsPerSample).to_bytes(2,'little')                                   # (2byte)
-    o += bytes("data",'ascii')                                                  # (4byte) Data Chunk Marker
-    o += (datasize).to_bytes(4,'little')                                        # (4byte) Data size in bytes
-    return o
-
 class Oled:
     def __init__(self):
         self.oled = happy.Oled(scl=5, sda=4)
 
-    def show(self, text):
+    def show(self, text, x=0, y=0):
         self.oled.Clear()
-        self.oled.Text(text, 0, 0)
+        self.oled.Text(text, x, y)
         self.oled.Show()
 
 def main():
@@ -233,7 +238,7 @@ def main():
     oled.show("INITING...")
     net = happy.Network("ft", "xiyangxiadebenpao")
     button = Pin(9, Pin.IN, Pin.PULL_UP)
-    conn = Connection()
+    conn = Connection(oled)
     def button_irq_handler(pin):
         nonlocal wakeup
         wakeup = not wakeup
@@ -247,9 +252,10 @@ def main():
 
     while True:
         if not wakeup:
+            oled.show("BUTTON WAKEUP...")
             time.sleep(0.5)
             continue
-        time.sleep(0.5)
+        time.sleep(0.3)
         try:
             conn.wait_ready()
             mic = MIC(Pin(10), Pin(3), Pin(2))
@@ -273,15 +279,11 @@ def main():
             wakeup = False
             oled.show("EXIT CHAT...")
             conn.disconnect()
-            time.sleep(1)
         except Exception as e:
             wakeup = False
             oled.show("ERROR...")
             #print(e)
             conn.disconnect()
-            time.sleep(1)
-        finally:
-            oled.show("BUTTON WAKEUP...")
 
 if __name__ == '__main__':
     main()
