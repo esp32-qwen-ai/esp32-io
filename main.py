@@ -22,7 +22,20 @@ class AudioPlayer:
         # self.audio = I2S(0, sck=self.sck_pin, ws=self.ws_pin, sd=self.sd_pin, mode=I2S.TX, bits=16, format=I2S.STEREO, rate=44100, ibuf=20000)
         self.audio = I2S(0, sck=self.sck_pin, ws=self.ws_pin, sd=self.sd_pin, mode=I2S.TX, bits=BITS, format=FORMAT, rate=AUDIO_SAMPLE_RATE, ibuf=32768)
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        empty = False
+        def empty_callback(*args, **kwargs):
+            nonlocal empty
+            empty = True
+        self.audio.irq(empty_callback)
+        self.audio.write(b'\x00\x00')
+        while not empty:
+            print('waiting for empty buffer')
+            time.sleep(0.01)
+        time.sleep(1)
         del self.audio
 
     def write(self, data):
@@ -35,7 +48,10 @@ class MIC:
         self.sd_pin = sd_pin
         self.mic = I2S(0, sck=self.sck_pin, ws=self.ws_pin, sd=self.sd_pin, mode=I2S.RX, bits=BITS, format=FORMAT, rate=MIC_SAMPLE_RATE, ibuf=32768)
 
-    def __del__(self):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
         del self.mic
 
     def read(self, data):
@@ -122,7 +138,6 @@ class Response:
 class ExitChatException(Exception):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
 
 class Connection:
     HOST = 'dev.lan'
@@ -255,34 +270,34 @@ def main():
             oled.show("BUTTON WAKEUP...")
             time.sleep(0.5)
             continue
-        time.sleep(0.3)
         try:
             conn.wait_ready()
-            mic = MIC(Pin(10), Pin(3), Pin(2))
             oled.show("RECORDING...")
-            record_done = 0
-            while record_done < RECORD_BUF_SIZE:
-                size = min(RECORD_BUF_SIZE - record_done, SOCKET_BUF_SIZE)
-                ret = mic.read(data_mv[:size])
-                record_done += ret
-                conn.sendall(data_mv[:ret], record_done == RECORD_BUF_SIZE)
-            del mic
+
+            with MIC(Pin(10), Pin(3), Pin(2)) as mic:
+                record_done = 0
+                while record_done < RECORD_BUF_SIZE:
+                    size = min(RECORD_BUF_SIZE - record_done, SOCKET_BUF_SIZE)
+                    ret = mic.read(data_mv[:size])
+                    record_done += ret
+                    conn.sendall(data_mv[:ret], record_done == RECORD_BUF_SIZE)
 
             oled.show("WAITING...")
             # conn.send('test.wav')
 
-            audio = AudioPlayer(Pin(1), Pin(12), Pin(0))
-            for chunk in conn.receive_stream():
-                audio.write(chunk)
-            del audio
+            with AudioPlayer(Pin(1), Pin(12), Pin(0)) as audio:
+                for chunk in conn.receive_stream():
+                    audio.write(chunk)
+
         except ExitChatException:
             wakeup = False
             oled.show("EXIT CHAT...")
             conn.disconnect()
         except Exception as e:
+            # raise
+            print(e)
             wakeup = False
             oled.show("ERROR...")
-            #print(e)
             conn.disconnect()
 
 if __name__ == '__main__':
